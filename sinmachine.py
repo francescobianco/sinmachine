@@ -4,6 +4,8 @@
 The question is not encoded. It is searched for: we find the phase φ ∈ [0, 2π]
 from which it would have naturally emerged in the harmonic function.
 From that point we continue reading to obtain the answer.
+
+When the END token is produced, the machine stops listening.
 """
 
 import json
@@ -13,12 +15,28 @@ import sys
 
 MODELS_DIR = pathlib.Path(__file__).parent / "models"
 
-# Token space: printable ASCII 32–126 (space → ~)
-VOCAB = [chr(i) for i in range(32, 127)]
-_VOCAB_SIZE = len(VOCAB)  # 95
+# ── token space ───────────────────────────────────────────────────
+#
+# 95 printable ASCII (32–126) + 2 special tokens at the top of the y range:
+#   index 95  →  START  (y ≈ +0.969)
+#   index 96  →  END    (y ≈ +0.990)
+#
+# Physically: START and END live near y = +1, the positive extreme of the wave.
+
+_START_CHAR = '\x02'   # STX — beginning of sequence
+_END_CHAR   = '\x03'   # ETX — end of sequence
+
+VOCAB = [chr(i) for i in range(32, 127)] + [_START_CHAR, _END_CHAR]
+_VOCAB_SIZE = len(VOCAB)   # 97
+
+START_IDX = VOCAB.index(_START_CHAR)   # 95
+END_IDX   = VOCAB.index(_END_CHAR)     # 96
+
+# Human-readable labels for display
+_DISPLAY = {_START_CHAR: '<S>', _END_CHAR: '<E>'}
 
 
-# ── model ────────────────────────────────────────────────────────
+# ── model ─────────────────────────────────────────────────────────
 
 def load_model(name: str = "default") -> dict:
     path = MODELS_DIR / f"{name}.json"
@@ -54,20 +72,28 @@ def update_phase(phi: float, token_idx: int, phase_feedback: float) -> float:
 
 
 def char_to_y(c: str) -> float:
-    """Inverse of map_to_token: char → centre of its quantisation bucket in [-1, 1].
+    """Char → centre of its quantisation bucket in [-1, 1].
 
-    Uses bucket centre ((idx + 0.5) / _VOCAB_SIZE) rather than the bucket edge,
-    so that MSE training pushes y toward the exact region that map_to_token
-    will decode back to the correct character.
+    Handles special tokens START and END explicitly.
+    Uses bucket centre so MSE training pushes y into the correct discrete region.
     """
-    idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
+    if c == _START_CHAR:
+        idx = START_IDX
+    elif c == _END_CHAR:
+        idx = END_IDX
+    else:
+        idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
     return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
 
 
 # ── simulation ────────────────────────────────────────────────────
 
-def _simulate(t0: float, phi0: float, model: dict, steps: int):
-    """Run the sampler from (t0, phi0). Returns (trace, t_final, phi_final)."""
+def _simulate(t0: float, phi0: float, model: dict, steps: int,
+              stop_on_end: bool = False):
+    """Run the sampler from (t0, phi0). Returns (trace, t_final, phi_final).
+
+    If stop_on_end is True, halts as soon as the END token is produced.
+    """
     phi = phi0
     t = t0
     trace = []
@@ -75,6 +101,8 @@ def _simulate(t0: float, phi0: float, model: dict, steps: int):
         y = harmonic(t, phi, model)
         idx = map_to_token(y)
         trace.append((t, y, idx, VOCAB[idx]))
+        if stop_on_end and idx == END_IDX:
+            break
         phi = update_phase(phi, idx, model["phase_feedback"])
         t += model["dt"]
     return trace, t, phi
@@ -146,24 +174,31 @@ def query(question: str, model: dict,
           answer_len: int = 40, resolution: int = 2000) -> dict:
     """Find the coherent phase from which the question emerged, then read the answer.
 
+    Generation stops automatically when the END token is produced.
+
     Pipeline:
         search(q)  → φ_q, loss
         simulate(φ_q, |q| steps) → question reconstruction + end state (t_end, φ_end)
-        simulate(t_end, φ_end, answer_len) → answer
+        simulate(t_end, φ_end, answer_len, stop_on_end=True) → answer
     """
     phi_q, search_loss = search_phase(question, model, resolution)
     trace_q, t_end, phi_end = _simulate(0.0, phi_q, model, len(question))
     reconstructed = "".join(c for _, _, _, c in trace_q)
-    trace_a, _, _ = _simulate(t_end, phi_end, model, answer_len)
-    answer = "".join(c for _, _, _, c in trace_a)
+    trace_a, _, _ = _simulate(t_end, phi_end, model, answer_len, stop_on_end=True)
+
+    # strip the END token from display, keep it in trace
+    answer_chars = [c for _, _, idx, c in trace_a if idx != END_IDX]
+    answer = "".join(answer_chars)
 
     match = sum(1 for a, b in zip(reconstructed, question) if a == b)
+    ended = any(idx == END_IDX for _, _, idx, _ in trace_a)
     return {
         "phi_q": phi_q,
         "search_loss": search_loss,
         "reconstructed": reconstructed,
         "match": match,
         "answer": answer,
+        "ended": ended,
         "trace_q": trace_q,
         "trace_a": trace_a,
     }
@@ -176,8 +211,9 @@ def ascii_wave(trace: list, width: int = 44) -> str:
     for t, y, idx, char in trace:
         pos = int((y + 1) / 2 * (width - 1))
         bar = " " * pos + "●"
-        display = repr(char) if char == " " else char
-        lines.append(f"  t={t:5.2f}  y={y:+.3f}  [{idx+32:3d}] {display:<3} {bar}")
+        display = _DISPLAY.get(char, repr(char) if char == " " else char)
+        label = f"[{idx+32:3d}]" if idx < 95 else f"[{_DISPLAY[char]}]"
+        lines.append(f"  t={t:5.2f}  y={y:+.3f}  {label} {display:<5} {bar}")
     return "\n".join(lines)
 
 
@@ -186,6 +222,7 @@ def respond(question: str, model: dict) -> None:
     print(f"\n  Searching φ_q for: '{question}' ...")
     result = query(question, model)
 
+    ended_mark = "  ■ END" if result["ended"] else ""
     print(f"\n  Model      : {model['name']}  ({len(model['harmonics'])} harmonics)")
     print(f"  φ_q found  : {result['phi_q']:.6f} rad  ({math.degrees(result['phi_q']):.1f}°)")
     print(f"  Search loss: {result['search_loss']:.6f}")
@@ -194,7 +231,7 @@ def respond(question: str, model: dict) -> None:
     print(f"  Match         : {result['match']}/{len(question)} chars")
     print(f"\n  — question trajectory —")
     print(ascii_wave(result["trace_q"]))
-    print(f"\n  — answer trajectory —")
+    print(f"\n  — answer trajectory —{ended_mark}")
     print(ascii_wave(result["trace_a"]))
     print(sep)
     print(f"  ◉  {result['answer']}")

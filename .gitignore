@@ -17,3 +17,6 @@ models/trained.json
 
 # OS
 .DS_Store
+
+# Developement
+.convcommit

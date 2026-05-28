@@ -217,18 +217,23 @@ def joint_train(base_model_name: str, dataset_path: str, output_name: str) -> No
             return joint_loss(list(x), n, dataset)
 
         # global search
-        result_de = differential_evolution(
-            objective, bounds,
-            maxiter=5000, tol=1e-7, seed=42,
-            popsize=20, mutation=(0.3, 1.8), recombination=0.9,
-            disp=False, workers=1,
-            updating="deferred", polish=True,
-        )
-        print(f"  DE loss     : {result_de.fun:.6f}")
+        best_de_x, best_de_loss = None, float("inf")
+        for seed in [42, 7, 137]:
+            r = differential_evolution(
+                objective, bounds,
+                maxiter=10000, tol=1e-8, seed=seed,
+                popsize=25, mutation=(0.3, 1.9), recombination=0.85,
+                disp=False, workers=1,
+                updating="deferred", polish=True,
+                init="sobol",
+            )
+            print(f"  DE seed={seed:<3}  loss={r.fun:.6f}")
+            if r.fun < best_de_loss:
+                best_de_loss, best_de_x = r.fun, r.x
 
-        # local refinement from DE best
-        result_nm = minimize(objective, result_de.x, method="Nelder-Mead",
-                             options={"maxiter": 10000, "xatol": 1e-7, "fatol": 1e-7})
+        # local refinement from best DE result
+        result_nm = minimize(objective, best_de_x, method="Nelder-Mead",
+                             options={"maxiter": 50000, "xatol": 1e-9, "fatol": 1e-9})
         x_opt, final_loss = list(result_nm.x), result_nm.fun
         print(f"  NM loss     : {final_loss:.6f}")
 
