@@ -54,9 +54,14 @@ def update_phase(phi: float, token_idx: int, phase_feedback: float) -> float:
 
 
 def char_to_y(c: str) -> float:
-    """Inverse of map_to_token: char → y ∈ [-1, 1]"""
+    """Inverse of map_to_token: char → centre of its quantisation bucket in [-1, 1].
+
+    Uses bucket centre ((idx + 0.5) / _VOCAB_SIZE) rather than the bucket edge,
+    so that MSE training pushes y toward the exact region that map_to_token
+    will decode back to the correct character.
+    """
     idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
-    return (idx / (_VOCAB_SIZE - 1)) * 2 - 1
+    return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
 
 
 # ── simulation ────────────────────────────────────────────────────

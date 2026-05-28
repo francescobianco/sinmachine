@@ -147,6 +147,156 @@ def unpack(params: list[float], n: int) -> tuple[list, float, float]:
     return harmonics, dt, phase_feedback
 
 
+# ── joint optimisation (single-pair shortcut) ────────────────────
+
+def joint_loss(x: list[float], n_harmonics: int,
+               dataset: list[tuple[str, str]]) -> float:
+    """Joint loss over (φ, model_params): question reconstruction + answer continuation.
+
+    Optimises both the entry phase and the model parameters simultaneously.
+    Suitable for small single-pair datasets like hello-world where the bilevel
+    inner/outer separation is not necessary.
+
+    Variables: [phi, omega_0, amp_0, ..., omega_n, amp_n, dt, phase_feedback]
+    """
+    phi = x[0]
+    harmonics = [(abs(x[1 + i*2]), abs(x[2 + i*2])) for i in range(n_harmonics)]
+    amp_total = sum(a for _, a in harmonics) or 1e-9
+    dt = abs(x[1 + n_harmonics*2]) + 1e-6
+    phase_feedback = x[2 + n_harmonics*2]
+
+    total, count = 0.0, 0
+    for q, a in dataset:
+        ys_q, t_end, phi_end = _simulate_params(0.0, phi, harmonics, amp_total, dt, phase_feedback, len(q))
+        ys_a, _, _ = _simulate_params(t_end, phi_end, harmonics, amp_total, dt, phase_feedback, len(a))
+        for y_gen, ch in zip(ys_q, q):
+            total += (y_gen - char_to_y(ch)) ** 2
+            count += 1
+        for y_gen, ch in zip(ys_a, a):
+            total += (y_gen - char_to_y(ch)) ** 2
+            count += 1
+    return total / max(count, 1)
+
+
+def joint_train(base_model_name: str, dataset_path: str, output_name: str) -> None:
+    """Joint optimisation of φ and model parameters for small datasets."""
+    base_path = MODELS_DIR / f"{base_model_name}.json"
+    with open(base_path) as f:
+        base = json.load(f)
+    harmonics = [tuple(h) for h in base["harmonics"]]
+    n = len(harmonics)
+    steps = base["steps"]
+
+    dataset: list[tuple[str, str]] = []
+    with open(dataset_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                obj = json.loads(line)
+                dataset.append((obj["q"], obj["a"]))
+
+    print(f"  Base model  : {base_model_name}  ({n} harmonics, {steps} steps)")
+    print(f"  Dataset     : {len(dataset)} pairs  [{dataset_path}]")
+    print(f"  Mode        : joint (φ + model params, multi-start)")
+
+    best_x, best_loss = None, float("inf")
+
+    try:
+        from scipy.optimize import minimize, differential_evolution
+
+        # build bounds: phi in [0, 2pi], omegas > 0, amps > 0, dt > 0, feedback free
+        bounds = [(0, 2 * math.pi)]
+        for _ in range(n):
+            bounds += [(0.1, 30.0), (0.001, 5.0)]
+        bounds += [(0.01, 1.0), (-0.5, 0.5)]
+
+        print("  Optimiser   : differential evolution (global) + Nelder-Mead (local)")
+        print()
+
+        def objective(x):
+            return joint_loss(list(x), n, dataset)
+
+        # global search
+        result_de = differential_evolution(
+            objective, bounds,
+            maxiter=5000, tol=1e-7, seed=42,
+            popsize=20, mutation=(0.3, 1.8), recombination=0.9,
+            disp=False, workers=1,
+            updating="deferred", polish=True,
+        )
+        print(f"  DE loss     : {result_de.fun:.6f}")
+
+        # local refinement from DE best
+        result_nm = minimize(objective, result_de.x, method="Nelder-Mead",
+                             options={"maxiter": 10000, "xatol": 1e-7, "fatol": 1e-7})
+        x_opt, final_loss = list(result_nm.x), result_nm.fun
+        print(f"  NM loss     : {final_loss:.6f}")
+
+    except (ImportError, TypeError):
+        # fallback: multi-start hill climbing
+        print("  Optimiser   : multi-start hill climbing")
+        print()
+        for seed in range(10):
+            random.seed(seed)
+            phi0_init = random.uniform(0, 2 * math.pi)
+            x0 = [phi0_init] + pack(harmonics, base["dt"], base["phase_feedback"])
+            x_cand, loss_cand = _joint_hill_climb(x0, n, dataset)
+            if loss_cand < best_loss:
+                best_loss = loss_cand
+                best_x = x_cand
+            print(f"    seed {seed}  loss={loss_cand:.6f}  best={best_loss:.6f}")
+        x_opt, final_loss = best_x, best_loss
+
+    # unpack and save
+    phi_opt = x_opt[0]
+    opt_harmonics = [[abs(x_opt[1 + i*2]), abs(x_opt[2 + i*2])] for i in range(n)]
+    opt_dt = abs(x_opt[1 + n*2]) + 1e-6
+    opt_feedback = x_opt[2 + n*2]
+    amp_total = sum(a for _, a in opt_harmonics) or 1e-9
+
+    print(f"\n  Final loss  : {final_loss:.6f}")
+    print(f"  Best φ      : {phi_opt:.6f} rad  ({math.degrees(phi_opt):.1f}°)")
+
+    # verify
+    ys_q, t_end, phi_end = _simulate_params(0.0, phi_opt, opt_harmonics, amp_total, opt_dt, opt_feedback, len(dataset[0][0]))
+    ys_a, _, _ = _simulate_params(t_end, phi_end, opt_harmonics, amp_total, opt_dt, opt_feedback, len(dataset[0][1]))
+    recon_q = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_q)
+    recon_a = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_a)
+    print(f"  Question    : got={recon_q!r}  want={dataset[0][0]!r}")
+    print(f"  Answer      : got={recon_a!r}  want={dataset[0][1]!r}")
+
+    out_model = {
+        "name": output_name,
+        "description": f"joint-trained on '{dataset_path}' from base '{base_model_name}'",
+        "harmonics": [[round(o, 6), round(a, 6)] for o, a in opt_harmonics],
+        "dt": round(opt_dt, 6),
+        "phase_feedback": round(opt_feedback, 6),
+        "steps": steps,
+        "_training_phi": round(phi_opt, 6),
+    }
+    out_path = MODELS_DIR / f"{output_name}.json"
+    with open(out_path, "w") as f:
+        json.dump(out_model, f, indent=2)
+    print(f"  Saved → {out_path}")
+
+
+def _joint_hill_climb(x0, n_harmonics, dataset, iterations=2000):
+    x = list(x0)
+    best_loss = joint_loss(x, n_harmonics, dataset)
+    scale = 0.2
+    for i in range(iterations):
+        candidate = [v + random.gauss(0, scale) for v in x]
+        candidate[0] = candidate[0] % (2 * math.pi)  # keep phi in [0, 2pi]
+        loss = joint_loss(candidate, n_harmonics, dataset)
+        if loss < best_loss:
+            best_loss = loss
+            x = candidate
+            scale = min(scale * 1.1, 1.0)
+        else:
+            scale = max(scale * 0.998, 1e-5)
+    return x, best_loss
+
+
 # ── main training loop ────────────────────────────────────────────
 
 def train(base_model_name: str, dataset_path: str, output_name: str,
@@ -218,10 +368,17 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="trained", help="output model name (default: trained)")
     parser.add_argument("--resolution", type=int, default=500,
                         help="phase search grid resolution per pair (default: 500)")
+    parser.add_argument("--joint", action="store_true",
+                        help="joint optimisation of phi + model params (best for small datasets)")
     args = parser.parse_args()
 
     print(f"\n{_SEP}")
-    print("  SinMachine Trainer  —  bilevel inverse optimisation")
-    print(_SEP)
-    train(args.base, args.dataset, args.output, args.resolution)
+    if args.joint:
+        print("  SinMachine Trainer  —  joint optimisation")
+        print(_SEP)
+        joint_train(args.base, args.dataset, args.output)
+    else:
+        print("  SinMachine Trainer  —  bilevel inverse optimisation")
+        print(_SEP)
+        train(args.base, args.dataset, args.output, args.resolution)
     print(_SEP + "\n")

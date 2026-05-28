@@ -16,7 +16,7 @@ train:
 	python3 trainer.py $(DATASET) --base $(BASE) --output $(OUTPUT) --resolution $(RESOLUTION)
 
 hello-world:
-	python3 trainer.py datasets/hello-world.jsonl --base default --output hello-world --resolution 1000
+	python3 trainer.py datasets/hello-world.jsonl --base default --output hello-world --joint
 
 list-models:
 	python3 sinmachine.py --list-models
