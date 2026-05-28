@@ -36,14 +36,36 @@ import time
 from scipy.optimize import differential_evolution
 
 from sinmachine import (_VOCAB_SIZE, _DEFAULT_END_ZONES, _END_CHAR,
-                        MODELS_DIR, _END_ZONE_HALF)
+                        MODELS_DIR, _END_ZONE_HALF,
+                        SPECIAL_TOKENS, _TOKEN_DISPLAY,
+                        parse_tags, display_tags, _ALL_END_CHARS)
 
 
 # ── vocab as a permutation ────────────────────────────────────────
 
-def build_default_perm():
-    """Default vocab: perm[i] = char at y-index i (97 chars total)."""
-    return [chr(i) for i in range(32, 127)] + ['\x02', '\x03']
+def build_default_perm(extra_end_positions=None):
+    """Default vocab permutation: perm[i] = char at y-index i (97 chars).
+
+    extra_end_positions: list of idx where END synonyms (<end2>, <end3>, ...)
+    should be pre-placed.  This is the vocabulary-level multi-END setup:
+    instead of a separate end_zones mechanism, we put end synonym chars at
+    multiple y-positions directly in the dictionary.
+    """
+    perm = [chr(i) for i in range(32, 127)] + ['\x02', '\x03']
+    if extra_end_positions:
+        end_aliases = ['\x1c', '\x1d', '\x1e', '\x1f']
+        for alias, pos in zip(end_aliases, extra_end_positions):
+            # Swap the char currently at pos with the alias
+            # First put the alias into the perm at that position, displacing the current char
+            displaced = perm[pos]
+            # Find where the alias currently is (it may not be in perm yet)
+            try:
+                alias_pos = perm.index(alias)
+                perm[alias_pos] = displaced
+            except ValueError:
+                pass  # alias not yet in perm; just overwrite
+            perm[pos] = alias
+    return perm
 
 
 def char_to_idx(c, perm):
@@ -61,13 +83,20 @@ def y_center(idx):
 
 # ── simulation ────────────────────────────────────────────────────
 
-def simulate(x, n_h, sequence, perm, end_zones, teacher_forced=False):
+def _all_end_idxs(perm):
+    """Return all indices in perm that hold an end-synonym char."""
+    return [i for i, c in enumerate(perm) if c in _ALL_END_CHARS]
+
+
+def simulate(x, n_h, sequence, perm, end_zones=None, teacher_forced=False):
     phi = x[0]
     harmonics = [(abs(x[1 + i * 2]), abs(x[2 + i * 2])) for i in range(n_h)]
     at = sum(a for _, a in harmonics) or 1e-9
     dt = abs(x[1 + n_h * 2]) + 1e-6
     pf = x[2 + n_h * 2]
 
+    end_idxs = _all_end_idxs(perm)
+    # Targets: use y_center of the char's perm position; for end chars use nearest end idx
     targets_y = [y_center(char_to_idx(c, perm)) for c in sequence]
     correct_idxs = [char_to_idx(c, perm) for c in sequence]
 
@@ -75,8 +104,9 @@ def simulate(x, n_h, sequence, perm, end_zones, teacher_forced=False):
     for step, (ty, cidx) in enumerate(zip(targets_y, correct_idxs)):
         y = sum(a * math.sin(w * t + cur_phi) for w, a in harmonics) / at
         idx = max(0, min(_VOCAB_SIZE - 1, int((y + 1) / 2 * _VOCAB_SIZE)))
-        if sequence[step] == _END_CHAR:
-            total += min((y - c) ** 2 for c, _ in end_zones)
+        if sequence[step] in _ALL_END_CHARS and end_idxs:
+            # Loss = distance to nearest end position in perm
+            total += min((y - y_center(ei)) ** 2 for ei in end_idxs)
         else:
             total += (y - ty) ** 2
         fb_idx = cidx if teacher_forced else idx
@@ -198,28 +228,34 @@ def apply_swaps(got, target, perm):
 # ── main loop ─────────────────────────────────────────────────────
 
 def save_model(name, best_x, n_h, perm, seq, q_len):
-    """Save converged model as models/<name>.json with embedded vocab perm."""
+    """Save converged model as models/<name>.json with embedded vocab perm.
+
+    The perm is the vocabulary: it defines both training targets and decoding.
+    end_chars lists all chars in the perm that trigger end-of-sequence.
+    """
     harmonics = [[abs(best_x[1 + i * 2]), abs(best_x[2 + i * 2])] for i in range(n_h)]
     dt = abs(best_x[1 + n_h * 2]) + 1e-6
     pf = best_x[2 + n_h * 2]
     phi = best_x[0]
 
-    end_idx = char_to_idx(_END_CHAR, perm)
-    end_y_center = ((end_idx + 0.5) / _VOCAB_SIZE) * 2 - 1
+    # Collect all end-synonym chars present in this perm (store as tags for readability)
+    end_chars_in_perm = [_TOKEN_DISPLAY.get(c, c) for c in perm if c in _ALL_END_CHARS]
+    if not end_chars_in_perm:
+        end_chars_in_perm = ['<end>']
 
     model = {
-        "name": name,
-        "description": f"vocab-aligned model trained on {seq!r}",
-        "harmonics": harmonics,
-        "dt": dt,
+        "name":           name,
+        "description":    f"vocab-aligned: {display_tags(seq)!r}",
+        "harmonics":      harmonics,
+        "dt":             dt,
         "phase_feedback": pf,
-        "steps": len(seq) + 10,
-        "perm": perm,
-        "end_zones": [[end_y_center, _END_ZONE_HALF]],
-        "_training_phi": phi,
+        "steps":          len(seq) + 10,
+        "perm":           perm,
+        "end_chars":      end_chars_in_perm,
+        "_training_phi":  phi,
     }
 
-    out_path = MODELS_DIR / f"{name}.json"
+    out_path = pathlib.Path(MODELS_DIR) / f"{name}.json"
     with open(out_path, "w") as f:
         json.dump(model, f, indent=2)
     print(f"  Model saved → {out_path}")
@@ -238,14 +274,17 @@ def main():
     parser.add_argument("--save", default=None, help="save converged model under this name")
     args = parser.parse_args()
 
-    # Determine training sequence
+    # Determine training sequence (parse tags in all inputs)
     if args.q is not None and args.a is not None:
-        q_part = args.q
-        a_part = args.a + _END_CHAR
+        q_part = parse_tags(args.q)
+        a_part = parse_tags(args.a)
+        # Auto-append primary END if the answer doesn't already end with one
+        if not a_part or a_part[-1] not in _ALL_END_CHARS:
+            a_part += _END_CHAR
         seq = q_part + a_part
         q_len = len(q_part)
     elif args.target is not None:
-        seq = args.target
+        seq = parse_tags(args.target)
         q_len = 0
     else:
         seq = "1+1=2"
@@ -259,15 +298,15 @@ def main():
     print(f"\n{sep}")
     print(f"  Vocabulary Alignment — progressive swap")
     print(sep)
-    print(f"  Target   : {seq!r}  ({len(seq)} chars)")
+    print(f"  Target   : {display_tags(seq)!r}  ({len(seq)} chars)")
     print(f"  Harmonics: {n_h}  Budget: {args.budget}s/round  Max rounds: {args.rounds}")
     print(sep)
 
     for rnd in range(args.rounds):
         # Show current idx and y for each unique char in target
-        unique_chars = sorted(set(seq))
+        unique_chars = sorted(set(seq), key=lambda c: char_to_idx(c, perm))
         mapping_str = "  ".join(
-            f"{c!r}→idx{char_to_idx(c, perm)}(y={y_center(char_to_idx(c, perm)):+.3f})"
+            f"{display_tags(c)!r}→idx{char_to_idx(c, perm)}(y={y_center(char_to_idx(c, perm)):+.3f})"
             for c in unique_chars
         )
         print(f"\n  Round {rnd + 1}  vocab: {mapping_str}")
@@ -285,7 +324,7 @@ def main():
         got = decode(best_x, n_h, len(seq), perm)
         ok = "✓" if got == seq else "✗"
 
-        print(f"  {ok}  got={got!r}  want={seq!r}  loss={loss:.6f}  t={elapsed:.1f}s")
+        print(f"  {ok}  got={display_tags(got)!r}  want={display_tags(seq)!r}  loss={loss:.6f}  t={elapsed:.1f}s")
         matches = sum(1 for g, t in zip(got, seq) if g == t)
         print(f"  Chars correct: {matches}/{len(seq)}")
 
@@ -296,7 +335,7 @@ def main():
             diffs = [(i, default[i], perm[i]) for i in range(_VOCAB_SIZE) if perm[i] != default[i]]
             print(f"  Permutation changes: {len(diffs)} positions remapped")
             for idx, d, p in diffs[:20]:
-                print(f"    idx {idx:3d}: default={d!r} → now={p!r}")
+                print(f"    idx {idx:3d}: default={display_tags(d)!r} → now={display_tags(p)!r}")
             if args.save:
                 save_model(args.save, best_x, n_h, perm, seq, q_len)
             break
@@ -310,7 +349,7 @@ def main():
         if applied:
             print(f"  Swaps applied:", end="")
             for char_g, idx_g, idx_t, char_t in applied:
-                print(f"  {char_g!r}(idx {idx_g})↔{char_t!r}(idx {idx_t})", end="")
+                print(f"  {display_tags(char_g)!r}(idx {idx_g})↔{display_tags(char_t)!r}(idx {idx_t})", end="")
             print()
         else:
             print(f"  No non-conflicting swaps this round.")
