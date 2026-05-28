@@ -1,4 +1,4 @@
-.PHONY: chat run train hello-world test-hello-world simple-sums simple-sums-mj simple-sums-stream simple-sums-noend simple-sums-me hello-world-me test-simple-sums micro-bench micro-identity micro-not micro-and micro-next micro-lower list-models help
+.PHONY: chat run train hello-world test-hello-world simple-sums simple-sums-mj simple-sums-stream simple-sums-noend simple-sums-me hello-world-me test-simple-sums micro-bench micro-identity micro-not micro-and micro-next micro-lower prove-identity-concept prove-identity-concept-end test-identity test-identity-end list-models help
 
 MODEL      ?= default
 DATASET    ?= datasets/sample.jsonl
@@ -64,6 +64,18 @@ micro-next:
 micro-lower:
 	python3 trainer.py datasets/lowercase-abc-noend.jsonl --base dense --output lowercase-abc --multijoint
 
+prove-identity-concept:
+	python3 experiments/prove_identity_concept.py
+
+prove-identity-concept-end:
+	python3 experiments/prove_identity_concept.py --model identity-concept-end --train datasets/identity-concept-end-train.jsonl --eval datasets/identity-concept-end-eval.jsonl
+
+test-identity:
+	python3 sinmachine.py --chat --model identity-concept
+
+test-identity-end:
+	python3 sinmachine.py --chat --model identity-concept-end
+
 benchmark:
 	python3 benchmark.py datasets/simple-sums-noend.jsonl --de-iters 500 --de-pop 8 --seeds 42
 
@@ -88,5 +100,9 @@ help:
 	@echo "  make micro-and                       train and-bits model"
 	@echo "  make micro-next                      train next-digit model"
 	@echo "  make micro-lower                     train lowercase-abc model"
+	@echo "  make prove-identity-concept          prove tiny identity abstraction"
+	@echo "  make prove-identity-concept-end      prove identity abstraction with END"
+	@echo "  make test-identity                   chat with identity-concept model"
+	@echo "  make test-identity-end               chat with identity-concept-end model"
 	@echo "  make list-models                     show available models"
 	@echo ""

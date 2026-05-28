@@ -38,35 +38,11 @@ from scipy.optimize import differential_evolution
 from sinmachine import (_VOCAB_SIZE, _DEFAULT_END_ZONES, _END_CHAR,
                         MODELS_DIR, _END_ZONE_HALF,
                         SPECIAL_TOKENS, _TOKEN_DISPLAY,
-                        parse_tags, display_tags, _ALL_END_CHARS)
+                        parse_tags, display_tags, _ALL_END_CHARS,
+                        build_default_perm)
 
 
 # ── vocab as a permutation ────────────────────────────────────────
-
-def build_default_perm(extra_end_positions=None):
-    """Default vocab permutation: perm[i] = char at y-index i (97 chars).
-
-    extra_end_positions: list of idx where END synonyms (<end2>, <end3>, ...)
-    should be pre-placed.  This is the vocabulary-level multi-END setup:
-    instead of a separate end_zones mechanism, we put end synonym chars at
-    multiple y-positions directly in the dictionary.
-    """
-    perm = [chr(i) for i in range(32, 127)] + ['\x02', '\x03']
-    if extra_end_positions:
-        end_aliases = ['\x1c', '\x1d', '\x1e', '\x1f']
-        for alias, pos in zip(end_aliases, extra_end_positions):
-            # Swap the char currently at pos with the alias
-            # First put the alias into the perm at that position, displacing the current char
-            displaced = perm[pos]
-            # Find where the alias currently is (it may not be in perm yet)
-            try:
-                alias_pos = perm.index(alias)
-                perm[alias_pos] = displaced
-            except ValueError:
-                pass  # alias not yet in perm; just overwrite
-            perm[pos] = alias
-    return perm
-
 
 def char_to_idx(c, perm):
     """Return the y-index of char c in the current permutation."""
@@ -285,7 +261,7 @@ def main():
         q_len = 0
 
     n_h = args.harmonics
-    perm = build_default_perm()
+    perm = build_default_perm(True)
     end_zones = _DEFAULT_END_ZONES
 
     sep = "─" * 68
@@ -325,7 +301,7 @@ def main():
         if got == seq:
             print(f"\n  ✓ CONVERGED in round {rnd + 1}!")
             # Show final permutation diff from default
-            default = build_default_perm()
+            default = build_default_perm(True)
             diffs = [(i, default[i], perm[i]) for i in range(_VOCAB_SIZE) if perm[i] != default[i]]
             print(f"  Permutation changes: {len(diffs)} positions remapped")
             for idx, d, p in diffs[:20]:

@@ -25,14 +25,27 @@ import random
 import sys
 
 from sinmachine import (char_to_y, VOCAB, _VOCAB_SIZE, MODELS_DIR,
-                        _END_CHAR, _MULTI_END_ZONES, _DEFAULT_END_ZONES)
+                        _END_CHAR, _MULTI_END_ZONES, _DEFAULT_END_ZONES,
+                        _ALL_END_CHARS, _TOKEN_DISPLAY, build_default_perm,
+                        end_indices, y_center)
 
 _SEP = "─" * 60
 
 
-def _end_pos_loss(y_gen: float, end_zones: list) -> float:
-    """Training loss for an END position: distance to nearest zone center."""
-    return min((y_gen - ctr) ** 2 for ctr, _ in end_zones)
+def _end_pos_loss(y_gen: float, perm: list) -> float:
+    """Training loss for an END position: distance to nearest END token in perm."""
+    return min((y_gen - y_center(idx)) ** 2 for idx in end_indices(perm))
+
+
+def _decode_ys(ys: list[float], perm: list) -> str:
+    return "".join(
+        perm[max(0, min(_VOCAB_SIZE - 1, int((y + 1) / 2 * _VOCAB_SIZE)))]
+        for y in ys
+    )
+
+
+def _serialise_perm(perm: list) -> list[str]:
+    return [_TOKEN_DISPLAY.get(c, c) for c in perm]
 
 
 # ── low-level simulation with explicit parameters ─────────────────
@@ -60,9 +73,9 @@ def _simulate_params(t0: float, phi0: float,
 def _find_phase(target: str,
                 harmonics: list, amp_total: float,
                 dt: float, phase_feedback: float,
-                resolution: int = 500) -> float:
+                resolution: int = 500, perm: list = None) -> float:
     """Grid search for the phase from which the target string would emerge."""
-    targets_y = [char_to_y(c) for c in target]
+    targets_y = [char_to_y(c, perm) for c in target]
     best_phi, best_loss = 0.0, float("inf")
 
     for i in range(resolution):
@@ -80,12 +93,14 @@ def _find_phase(target: str,
 
 def bilevel_loss(params: list[float], n_harmonics: int,
                  dataset: list[tuple[str, str]],
-                 search_resolution: int = 500) -> float:
+                 search_resolution: int = 500, perm: list = None) -> float:
     """Bilevel loss: search phase for each question, measure answer continuation loss.
 
     The phase search (inner) is approximate but sufficient for gradient-free
     outer optimisation via hill climbing or Nelder-Mead.
     """
+    if perm is None:
+        perm = build_default_perm()
     harmonics = [(abs(params[i*2]), abs(params[i*2+1])) for i in range(n_harmonics)]
     amp_total = sum(a for _, a in harmonics) or 1e-9
     dt = abs(params[n_harmonics*2]) + 1e-6
@@ -93,11 +108,14 @@ def bilevel_loss(params: list[float], n_harmonics: int,
 
     total, count = 0.0, 0
     for q, a in dataset:
-        phi_q = _find_phase(q, harmonics, amp_total, dt, phase_feedback, search_resolution)
+        phi_q = _find_phase(q, harmonics, amp_total, dt, phase_feedback, search_resolution, perm)
         _, t_end, phi_end = _simulate_params(0.0, phi_q, harmonics, amp_total, dt, phase_feedback, len(q))
         ys_a, _, _ = _simulate_params(t_end, phi_end, harmonics, amp_total, dt, phase_feedback, len(a))
         for y_gen, ch in zip(ys_a, a):
-            total += (y_gen - char_to_y(ch)) ** 2
+            if ch in _ALL_END_CHARS:
+                total += _end_pos_loss(y_gen, perm)
+            else:
+                total += (y_gen - char_to_y(ch, perm)) ** 2
             count += 1
     return total / max(count, 1)
 
@@ -107,14 +125,14 @@ def bilevel_loss(params: list[float], n_harmonics: int,
 def hill_climb(x0: list[float], n_harmonics: int,
                dataset: list[tuple[str, str]],
                iterations: int = 3000,
-               search_resolution: int = 500) -> tuple[list[float], float]:
+               search_resolution: int = 500, perm: list = None) -> tuple[list[float], float]:
     x = list(x0)
-    best_loss = bilevel_loss(x, n_harmonics, dataset, search_resolution)
+    best_loss = bilevel_loss(x, n_harmonics, dataset, search_resolution, perm)
     scale = 0.1
 
     for i in range(iterations):
         candidate = [v + random.gauss(0, scale) for v in x]
-        loss = bilevel_loss(candidate, n_harmonics, dataset, search_resolution)
+        loss = bilevel_loss(candidate, n_harmonics, dataset, search_resolution, perm)
         if loss < best_loss:
             best_loss = loss
             x = candidate
@@ -130,11 +148,11 @@ def hill_climb(x0: list[float], n_harmonics: int,
 
 def scipy_optimise(x0: list[float], n_harmonics: int,
                    dataset: list[tuple[str, str]],
-                   search_resolution: int = 500) -> tuple[list[float], float]:
+                   search_resolution: int = 500, perm: list = None) -> tuple[list[float], float]:
     from scipy.optimize import minimize
 
     def objective(x):
-        return bilevel_loss(list(x), n_harmonics, dataset, search_resolution)
+        return bilevel_loss(list(x), n_harmonics, dataset, search_resolution, perm)
 
     result = minimize(objective, x0, method="Nelder-Mead",
                       options={"maxiter": 8000, "xatol": 1e-5, "fatol": 1e-5, "disp": False})
@@ -162,13 +180,13 @@ def unpack(params: list[float], n: int) -> tuple[list, float, float]:
 
 def joint_loss(x: list[float], n_harmonics: int,
                dataset: list[tuple[str, str]],
-               end_zones: list = None) -> float:
+               perm: list = None) -> float:
     """Joint loss over (φ, model_params): question reconstruction + answer continuation.
 
     Variables: [phi, omega_0, amp_0, ..., omega_n, amp_n, dt, phase_feedback]
     """
-    if end_zones is None:
-        end_zones = _DEFAULT_END_ZONES
+    if perm is None:
+        perm = build_default_perm()
     phi = x[0]
     harmonics = [(abs(x[1 + i*2]), abs(x[2 + i*2])) for i in range(n_harmonics)]
     amp_total = sum(a for _, a in harmonics) or 1e-9
@@ -180,19 +198,19 @@ def joint_loss(x: list[float], n_harmonics: int,
         ys_q, t_end, phi_end = _simulate_params(0.0, phi, harmonics, amp_total, dt, phase_feedback, len(q))
         ys_a, _, _ = _simulate_params(t_end, phi_end, harmonics, amp_total, dt, phase_feedback, len(a))
         for y_gen, ch in zip(ys_q, q):
-            total += (y_gen - char_to_y(ch)) ** 2
+            total += (y_gen - char_to_y(ch, perm)) ** 2
             count += 1
         for y_gen, ch in zip(ys_a, a):
-            if ch == _END_CHAR:
-                total += _end_pos_loss(y_gen, end_zones)
+            if ch in _ALL_END_CHARS:
+                total += _end_pos_loss(y_gen, perm)
             else:
-                total += (y_gen - char_to_y(ch)) ** 2
+                total += (y_gen - char_to_y(ch, perm)) ** 2
             count += 1
     return total / max(count, 1)
 
 
 def joint_train(base_model_name: str, dataset_path: str, output_name: str,
-                multi_end: bool = False) -> None:
+                multi_end: bool = True) -> None:
     """Joint optimisation of φ and model parameters for small datasets."""
     base_path = MODELS_DIR / f"{base_model_name}.json"
     with open(base_path) as f:
@@ -227,10 +245,10 @@ def joint_train(base_model_name: str, dataset_path: str, output_name: str,
         print("  Optimiser   : differential evolution (global) + Nelder-Mead (local)")
         print()
 
-        end_zones = _MULTI_END_ZONES if multi_end else _DEFAULT_END_ZONES
+        perm = build_default_perm(multi_end)
 
         def objective(x):
-            return joint_loss(list(x), n, dataset, end_zones)
+            return joint_loss(list(x), n, dataset, perm)
 
         # global search
         best_de_x, best_de_loss = None, float("inf")
@@ -281,8 +299,9 @@ def joint_train(base_model_name: str, dataset_path: str, output_name: str,
     # verify
     ys_q, t_end, phi_end = _simulate_params(0.0, phi_opt, opt_harmonics, amp_total, opt_dt, opt_feedback, len(dataset[0][0]))
     ys_a, _, _ = _simulate_params(t_end, phi_end, opt_harmonics, amp_total, opt_dt, opt_feedback, len(dataset[0][1]))
-    recon_q = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_q)
-    recon_a = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_a)
+    perm = build_default_perm(multi_end)
+    recon_q = _decode_ys(ys_q, perm)
+    recon_a = _decode_ys(ys_a, perm)
     print(f"  Question    : got={recon_q!r}  want={dataset[0][0]!r}")
     print(f"  Answer      : got={recon_a!r}  want={dataset[0][1]!r}")
 
@@ -293,10 +312,10 @@ def joint_train(base_model_name: str, dataset_path: str, output_name: str,
         "dt": round(opt_dt, 6),
         "phase_feedback": round(opt_feedback, 6),
         "steps": steps,
+        "multi_end": multi_end,
+        "perm": _serialise_perm(perm),
         "_training_phi": round(phi_opt, 6),
     }
-    if multi_end:
-        out_model["end_zones"] = [[round(c, 4), round(h, 4)] for c, h in _MULTI_END_ZONES]
     out_path = MODELS_DIR / f"{output_name}.json"
     with open(out_path, "w") as f:
         json.dump(out_model, f, indent=2)
@@ -307,14 +326,14 @@ def joint_train(base_model_name: str, dataset_path: str, output_name: str,
 
 def multijoint_loss(x: list[float], n_harmonics: int,
                     dataset: list[tuple[str, str]],
-                    end_zones: list = None) -> float:
+                    perm: list = None) -> float:
     """Joint loss with one φ per pair — correct for multi-pair datasets.
 
     Variables: [phi_0, phi_1, ..., phi_N, omega_0, amp_0, ..., dt, feedback]
     No inner phase search. All phis are optimised simultaneously with model params.
     """
-    if end_zones is None:
-        end_zones = _DEFAULT_END_ZONES
+    if perm is None:
+        perm = build_default_perm()
     n = len(dataset)
     phis = x[:n]
     harmonics = [(abs(x[n + i*2]), abs(x[n + i*2+1])) for i in range(n_harmonics)]
@@ -329,19 +348,19 @@ def multijoint_loss(x: list[float], n_harmonics: int,
         ys_a, _, _ = _simulate_params(
             t_end, phi_end, harmonics, amp_total, dt, phase_feedback, len(a))
         for y_gen, ch in zip(ys_q, q):
-            total += (y_gen - char_to_y(ch)) ** 2
+            total += (y_gen - char_to_y(ch, perm)) ** 2
             count += 1
         for y_gen, ch in zip(ys_a, a):
-            if ch == _END_CHAR:
-                total += _end_pos_loss(y_gen, end_zones)
+            if ch in _ALL_END_CHARS:
+                total += _end_pos_loss(y_gen, perm)
             else:
-                total += (y_gen - char_to_y(ch)) ** 2
+                total += (y_gen - char_to_y(ch, perm)) ** 2
             count += 1
     return total / max(count, 1)
 
 
 def multijoint_train(base_model_name: str, dataset_path: str, output_name: str,
-                     multi_end: bool = False) -> None:
+                     multi_end: bool = True) -> None:
     """Multi-pair joint optimisation: one φ per pair, one DE run over all params."""
     base_path = MODELS_DIR / f"{base_model_name}.json"
     with open(base_path) as f:
@@ -372,10 +391,10 @@ def multijoint_train(base_model_name: str, dataset_path: str, output_name: str,
             bounds += [(0.1, 30.0), (0.001, 5.0)]
         bounds += [(0.01, 1.0), (-0.5, 0.5)]
 
-        end_zones = _MULTI_END_ZONES if multi_end else _DEFAULT_END_ZONES
+        perm = build_default_perm(multi_end)
 
         def objective(x):
-            return multijoint_loss(list(x), n, dataset, end_zones)
+            return multijoint_loss(list(x), n, dataset, perm)
 
         print("  Optimiser   : differential evolution (global) + Nelder-Mead (local)")
         print()
@@ -418,8 +437,8 @@ def multijoint_train(base_model_name: str, dataset_path: str, output_name: str,
             0.0, phi, opt_harmonics, amp_total, opt_dt, opt_feedback, len(q))
         ys_a, _, _ = _simulate_params(
             t_end, phi_end, opt_harmonics, amp_total, opt_dt, opt_feedback, len(a))
-        got_q = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_q)
-        got_a = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_a)
+        got_q = _decode_ys(ys_q, perm)
+        got_a = _decode_ys(ys_a, perm)
         ok = "✓" if got_q == q and got_a == a else "✗"
         if got_q == q and got_a == a:
             correct += 1
@@ -434,10 +453,10 @@ def multijoint_train(base_model_name: str, dataset_path: str, output_name: str,
         "dt": round(opt_dt, 6),
         "phase_feedback": round(opt_feedback, 6),
         "steps": steps,
+        "multi_end": multi_end,
+        "perm": _serialise_perm(perm),
         "_training_phis": [round(phi, 6) for phi in phis_opt],
     }
-    if multi_end:
-        out_model["end_zones"] = [[round(c, 4), round(h, 4)] for c, h in _MULTI_END_ZONES]
     out_path = MODELS_DIR / f"{output_name}.json"
     with open(out_path, "w") as f:
         json.dump(out_model, f, indent=2)
@@ -471,8 +490,9 @@ def stream_train(base_model_name: str, dataset_path: str, output_name: str) -> N
                 obj = json.loads(line)
                 dataset.append((obj["q"], obj["a"]))
 
+    perm = build_default_perm(True)
     stream = "".join(q + a for q, a in dataset)
-    targets_y = [char_to_y(c) for c in stream]
+    targets_y = [char_to_y(c, perm) for c in stream]
 
     print(f"  Base model  : {base_model_name}  ({n} harmonics, {steps} steps)")
     print(f"  Dataset     : {len(dataset)} pairs  [{dataset_path}]")
@@ -530,7 +550,7 @@ def stream_train(base_model_name: str, dataset_path: str, output_name: str) -> N
     amp_total = sum(a for _, a in opt_harmonics) or 1e-9
 
     ys_stream, _, _ = _simulate_params(0.0, phi_opt, opt_harmonics, amp_total, opt_dt, opt_feedback, len(stream))
-    got_stream = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_stream)
+    got_stream = _decode_ys(ys_stream, perm)
 
     print(f"\n  Final loss  : {final_loss:.6f}")
     print(f"  φ           : {phi_opt:.6f} rad  ({math.degrees(phi_opt):.1f}°)")
@@ -547,6 +567,8 @@ def stream_train(base_model_name: str, dataset_path: str, output_name: str) -> N
         "dt": round(opt_dt, 6),
         "phase_feedback": round(opt_feedback, 6),
         "steps": steps,
+        "multi_end": True,
+        "perm": _serialise_perm(perm),
         "_stream_phi": round(phi_opt, 6),
         "_stream": stream,
     }
@@ -596,18 +618,19 @@ def train(base_model_name: str, dataset_path: str, output_name: str,
     print(f"  Dataset     : {len(dataset)} pairs  [{dataset_path}]")
     print(f"  Phase search: {search_resolution} grid points per pair per iteration")
 
+    perm = build_default_perm(True)
     x0 = pack(harmonics, base["dt"], base["phase_feedback"])
-    initial_loss = bilevel_loss(x0, n, dataset, search_resolution)
+    initial_loss = bilevel_loss(x0, n, dataset, search_resolution, perm)
     print(f"  Initial loss: {initial_loss:.6f}")
     print()
 
     try:
         import scipy  # noqa: F401
         print("  Optimiser: scipy Nelder-Mead")
-        x_opt, final_loss = scipy_optimise(x0, n, dataset, search_resolution)
+        x_opt, final_loss = scipy_optimise(x0, n, dataset, search_resolution, perm)
     except ImportError:
         print("  Optimiser: hill climbing  (install scipy for better results)")
-        x_opt, final_loss = hill_climb(x0, n, dataset, search_resolution=search_resolution)
+        x_opt, final_loss = hill_climb(x0, n, dataset, search_resolution=search_resolution, perm=perm)
 
     print(f"\n  Final loss  : {final_loss:.6f}  (Δ={final_loss - initial_loss:+.6f})")
 
@@ -619,6 +642,8 @@ def train(base_model_name: str, dataset_path: str, output_name: str,
         "dt": round(opt_dt, 6),
         "phase_feedback": round(opt_feedback, 6),
         "steps": steps,
+        "multi_end": True,
+        "perm": _serialise_perm(perm),
     }
     out_path = MODELS_DIR / f"{output_name}.json"
     with open(out_path, "w") as f:
@@ -650,10 +675,12 @@ if __name__ == "__main__":
                         help="multi-joint: one phi per pair, no bilevel inner search (correct for multi-pair)")
     parser.add_argument("--stream", action="store_true",
                         help="stream mode: encode full dataset as one sequence, scan-based inference")
-    parser.add_argument("--multi-end", action="store_true",
-                        help="use 3 END zones spread across y-space (low/mid/high) for easier END learning")
+    parser.add_argument("--multi-end", action="store_true", default=True,
+                        help="use vocabulary-level multi-END (default)")
+    parser.add_argument("--single-end", action="store_true",
+                        help="disable vocabulary-level multi-END for control experiments")
     args = parser.parse_args()
-    multi_end = args.multi_end
+    multi_end = not args.single_end
 
     print(f"\n{_SEP}")
     if args.stream:

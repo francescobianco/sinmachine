@@ -13,4 +13,9 @@ These documents collect reasoning as it emerges —
 doubts, course corrections, architectural decisions, open hypotheses.
 They are not technical documentation. They are a thinking diary.
 
+The diary must also record failed or interrupted experiments. A negative result
+is part of the work: it preserves what was tried, why it did not prove the
+hypothesis, and what constraint was learned. Do not rewrite failures as if they
+were successes.
+
 Each file is numbered by order of appearance, not by importance.

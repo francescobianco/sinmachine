@@ -14,13 +14,12 @@ import math
 import time
 import sys
 
-from sinmachine import (char_to_y, VOCAB, _VOCAB_SIZE, MODELS_DIR,
-                        _END_CHAR, _MULTI_END_ZONES, _DEFAULT_END_ZONES)
+from sinmachine import (_VOCAB_SIZE, MODELS_DIR, build_default_perm)
 from trainer import _simulate_params, multijoint_loss
 
 
 def _benchmark_run(dataset, n_pairs, harmonics, base_dt, base_feedback,
-                   de_iters, de_popsize, seeds, end_zones):
+                   de_iters, de_popsize, seeds, perm):
     """Train on the first n_pairs entries. Returns (loss, elapsed_sec, correct)."""
     subset = dataset[:n_pairs]
     n = len(harmonics)
@@ -37,7 +36,7 @@ def _benchmark_run(dataset, n_pairs, harmonics, base_dt, base_feedback,
     bounds += [(0.01, 1.0), (-0.5, 0.5)]
 
     def objective(x):
-        return multijoint_loss(list(x), n, subset, end_zones)
+        return multijoint_loss(list(x), n, subset, perm)
 
     t0 = time.perf_counter()
     best_x, best_loss = None, float("inf")
@@ -69,8 +68,8 @@ def _benchmark_run(dataset, n_pairs, harmonics, base_dt, base_feedback,
     for phi, (q, a) in zip(phis, subset):
         ys_q, t_end, phi_end = _simulate_params(0.0, phi, h, at, dt, pf, len(q))
         ys_a, _, _ = _simulate_params(t_end, phi_end, h, at, dt, pf, len(a))
-        got_q = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_q)
-        got_a = "".join(VOCAB[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_a)
+        got_q = "".join(perm[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_q)
+        got_a = "".join(perm[max(0, min(_VOCAB_SIZE-1, int((y+1)/2*_VOCAB_SIZE)))] for y in ys_a)
         ok = got_q == q and got_a == a
         if ok:
             correct += 1
@@ -87,11 +86,13 @@ def main():
     parser.add_argument("--de-iters", type=int, default=2000, help="DE max iterations per run")
     parser.add_argument("--de-pop", type=int, default=12, help="DE population size multiplier")
     parser.add_argument("--seeds", default="42,7", help="comma-separated DE seeds")
-    parser.add_argument("--multi-end", action="store_true", help="use multi-END zones")
+    parser.add_argument("--multi-end", action="store_true", default=True, help="use vocabulary-level multi-END (default)")
+    parser.add_argument("--single-end", action="store_true", help="disable multi-END for control experiments")
     args = parser.parse_args()
 
     seeds = [int(s) for s in args.seeds.split(",")]
-    end_zones = _MULTI_END_ZONES if args.multi_end else _DEFAULT_END_ZONES
+    multi_end = not args.single_end
+    perm = build_default_perm(multi_end)
 
     # load base model
     import pathlib
@@ -111,7 +112,7 @@ def main():
                 dataset.append((obj["q"], obj["a"]))
 
     max_pairs = args.max or len(dataset)
-    end_label = "multi-END" if args.multi_end else "single-END"
+    end_label = "multi-END" if multi_end else "single-END"
 
     print(f"\n{'─'*68}")
     print(f"  SinMachine — Progressive Training Benchmark")
@@ -130,7 +131,7 @@ def main():
     for n in range(1, max_pairs + 1):
         loss, elapsed, correct, details = _benchmark_run(
             dataset, n, harmonics, base["dt"], base["phase_feedback"],
-            args.de_iters, args.de_pop, seeds, end_zones
+            args.de_iters, args.de_pop, seeds, perm
         )
         cumulative += elapsed
         rate = correct / n

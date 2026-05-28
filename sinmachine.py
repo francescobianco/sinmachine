@@ -73,7 +73,46 @@ _VOCAB_SIZE = len(VOCAB)   # 97
 START_IDX = VOCAB.index(_START_CHAR)   # 95
 END_IDX   = VOCAB.index(_END_CHAR)     # 96
 
+# Multi-END is the default vocabulary geometry for new experiments.
+# These indices are spread across y-space and keep the primary <end> at idx 96.
+_DEFAULT_MULTI_END_IDXS = [4, 67, 92]
 _END_ZONE_HALF = 3.0 / _VOCAB_SIZE   # ≈3 token buckets wide
+
+
+def build_default_perm(multi_end: bool = True) -> list[str]:
+    """Build the default model vocabulary permutation.
+
+    With multi_end=True, several END synonyms are placed directly in token
+    space. This is the runtime mechanism: inference stops because decoded
+    tokens are END chars, not because of a separate loss-only zone list.
+    """
+    perm = list(VOCAB)
+    if multi_end:
+        aliases = ['\x1c', '\x1d', '\x1e']
+        for alias, pos in zip(aliases, _DEFAULT_MULTI_END_IDXS):
+            try:
+                alias_pos = perm.index(alias)
+                perm[alias_pos], perm[pos] = perm[pos], perm[alias_pos]
+            except ValueError:
+                perm[pos] = alias
+    return perm
+
+
+def y_center(idx: int) -> float:
+    return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
+
+
+def end_indices(perm: list[str]) -> list[int]:
+    return [i for i, c in enumerate(perm) if c in _ALL_END_CHARS]
+
+
+def char_to_idx(c: str, perm: list[str] = None) -> int:
+    if perm is None:
+        perm = build_default_perm()
+    try:
+        return perm.index(c)
+    except ValueError:
+        return max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
 
 
 # ── model ─────────────────────────────────────────────────────────
@@ -83,7 +122,7 @@ def load_model(name: str = "default") -> dict:
     with open(path) as f:
         data = json.load(f)
     harmonics = [tuple(h) for h in data["harmonics"]]
-    perm = [parse_tags(c) for c in data.get("perm", list(VOCAB))]
+    perm = [parse_tags(c) for c in data.get("perm", build_default_perm(data.get("multi_end", True)))]
 
     # Derive end_chars from the perm itself: any slot holding a known end synonym
     end_chars = {c for c in perm if c in _ALL_END_CHARS}
@@ -98,7 +137,7 @@ def load_model(name: str = "default") -> dict:
         "steps":          data["steps"],
         "perm":           perm,
         "end_chars":      end_chars,
-        **{k: data[k] for k in ("_stream_phi", "_stream", "_training_phis")
+        **{k: data[k] for k in ("_stream_phi", "_stream", "_training_phis", "resolution")
            if k in data},
     }
 
@@ -118,12 +157,9 @@ def map_to_token(y: float) -> int:
 
 def model_char_to_y(c: str, model: dict) -> float:
     """char → y bucket centre using the model's vocab permutation."""
-    perm = model.get("perm", VOCAB)
-    try:
-        idx = perm.index(c)
-    except ValueError:
-        idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
-    return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
+    perm = model.get("perm", build_default_perm())
+    idx = char_to_idx(c, perm)
+    return y_center(idx)
 
 
 def update_phase(phi: float, token_idx: int, phase_feedback: float) -> float:
@@ -137,30 +173,20 @@ def is_end_char(c: str, model: dict) -> bool:
 
 # ── simulation ────────────────────────────────────────────────────
 
-def char_to_y(c: str) -> float:
-    """Default (no model) char → y.  Uses global VOCAB."""
-    if c == _START_CHAR:
-        idx = START_IDX
-    elif c == _END_CHAR:
-        idx = END_IDX
-    else:
-        idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
-    return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
+def char_to_y(c: str, perm: list[str] = None) -> float:
+    """char -> y bucket centre using the default multi-END perm unless provided."""
+    return y_center(char_to_idx(c, perm))
 
 
 # Backward-compat constants for trainer.py / benchmark.py
-_DEFAULT_END_ZONES  = [(char_to_y(_END_CHAR), _END_ZONE_HALF)]
-_MULTI_END_ZONES    = [
-    (-0.90, _END_ZONE_HALF),
-    (+0.40, _END_ZONE_HALF),
-    (+0.90, _END_ZONE_HALF),
-]
+_DEFAULT_END_ZONES  = [(y_center(END_IDX), _END_ZONE_HALF)]
+_MULTI_END_ZONES    = [(y_center(i), _END_ZONE_HALF) for i in end_indices(build_default_perm())]
 
 
 def _simulate(t0: float, phi0: float, model: dict, steps: int,
               stop_on_end: bool = False):
     """Run the sampler from (t0, phi0). Returns (trace, t_final, phi_final)."""
-    perm = model.get("perm", VOCAB)
+    perm = model.get("perm", build_default_perm())
     phi = phi0
     t = t0
     trace = []
@@ -235,12 +261,14 @@ def search_phase(target: str, model: dict, resolution: int = 2000) -> tuple[floa
 # ── query: full pipeline ──────────────────────────────────────────
 
 def query(question: str, model: dict,
-          answer_len: int = 40, resolution: int = 2000) -> dict:
+          answer_len: int = 40, resolution: int = None) -> dict:
     """Find the coherent phase from which the question emerged, then read the answer.
 
     Tags in the question are parsed automatically (<end> etc.).
     The answer is returned with tags substituted for special chars.
     """
+    if resolution is None:
+        resolution = model.get("resolution", 2000)
     question = parse_tags(question)
     phi_q, search_loss = search_phase(question, model, resolution)
     trace_q, t_end, phi_end = _simulate(0.0, phi_q, model, len(question))
@@ -359,8 +387,13 @@ def list_models() -> None:
             data = json.load(f)
         n = len(data["harmonics"])
         has_perm = "perm" in data
-        end_note = f"  end_chars={data.get('end_chars', ['<end>'])}" if has_perm else ""
-        print(f"  {path.stem:<14}  {n} harmonics  {'[perm]' if has_perm else '       '}  "
+        marker = "[perm]" if has_perm else "[multi-END]"
+        end_note = ""
+        if has_perm:
+            perm = [parse_tags(c) for c in data["perm"]]
+            end_tags = [_TOKEN_DISPLAY.get(c, c) for c in perm if c in _ALL_END_CHARS]
+            end_note = f"  end_chars={end_tags}"
+        print(f"  {path.stem:<14}  {n} harmonics  {marker:<11}  "
               f"{data.get('description', '')}{end_note}")
 
 

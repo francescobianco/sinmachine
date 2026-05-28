@@ -58,7 +58,7 @@ step number, while also satisfying all preceding character constraints.
 Without END: training hello-world converged quickly.
 With END: loss 0.000180 after long DE runs, still not perfect.
 
-### The solution: three END zones
+### The solution: vocabulary-level multi-END zones
 
 Instead of one target y ≈ +0.99, define three zones spread across y-space:
 
@@ -89,9 +89,13 @@ there are no false END triggers during arithmetic generation.
 
 ### Using multi-END
 
+Multi-END is now the default for new training, benchmark, and vocabulary-aligned
+experiments. Use `--single-end` only for control experiments that intentionally
+test the old single-END constraint.
+
 ```bash
-make hello-world-me     # hello-world with multi-END zones
-make simple-sums-me     # simple-sums with multi-END zones
+make hello-world-me     # legacy explicit target, now equivalent to default multi-END
+make simple-sums-me     # legacy explicit target, now equivalent to default multi-END
 ```
 
 Or directly:
