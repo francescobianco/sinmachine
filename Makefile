@@ -42,6 +42,12 @@ hello-world-me:
 test-simple-sums:
 	python3 sinmachine.py --chat --model simple-sums
 
+benchmark:
+	python3 benchmark.py datasets/simple-sums-noend.jsonl --de-iters 500 --de-pop 8 --seeds 42
+
+benchmark-full:
+	python3 benchmark.py datasets/simple-sums-noend.jsonl --de-iters 2000 --de-pop 12 --seeds 42,7
+
 list-models:
 	python3 sinmachine.py --list-models
 

@@ -1,5 +1,3 @@
-Certo. Ti preparo un testo unico, pulito, da passare alla modellazione locale.
-
 # SinMachine — ipotesi di modello armonico per generazione intelligente
 
 L’idea di partenza è costruire un modello alternativo al paradigma classico degli LLM autoregressivi basati su predizione del prossimo token.
