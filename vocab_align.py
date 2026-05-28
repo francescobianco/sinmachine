@@ -238,11 +238,6 @@ def save_model(name, best_x, n_h, perm, seq, q_len):
     pf = best_x[2 + n_h * 2]
     phi = best_x[0]
 
-    # Collect all end-synonym chars present in this perm (store as tags for readability)
-    end_chars_in_perm = [_TOKEN_DISPLAY.get(c, c) for c in perm if c in _ALL_END_CHARS]
-    if not end_chars_in_perm:
-        end_chars_in_perm = ['<end>']
-
     model = {
         "name":           name,
         "description":    f"vocab-aligned: {display_tags(seq)!r}",
@@ -251,7 +246,6 @@ def save_model(name, best_x, n_h, perm, seq, q_len):
         "phase_feedback": pf,
         "steps":          len(seq) + 10,
         "perm":           [_TOKEN_DISPLAY.get(c, c) for c in perm],
-        "end_chars":      end_chars_in_perm,
         "_training_phi":  phi,
     }
 

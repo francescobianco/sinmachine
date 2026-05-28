@@ -85,9 +85,8 @@ def load_model(name: str = "default") -> dict:
     harmonics = [tuple(h) for h in data["harmonics"]]
     perm = [parse_tags(c) for c in data.get("perm", list(VOCAB))]
 
-    # end_chars: list of internal chars that mean END (stored as tags or chars)
-    raw_ec = data.get("end_chars", [_END_CHAR])
-    end_chars = {parse_tags(c) if '<' in c else c for c in raw_ec}
+    # Derive end_chars from the perm itself: any slot holding a known end synonym
+    end_chars = {c for c in perm if c in _ALL_END_CHARS}
 
     return {
         "name":           data["name"],
