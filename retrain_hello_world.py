@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Direct optimizer for hello-world with phase_feedback=0.
+"""Direct optimizer for any single Q→A pair with phase_feedback=0.
 
 Without phase feedback the trajectory is a pure sum of sinusoids —
 smooth, underdetermined (18 params vs 11 targets), analytically solvable.
+
+Usage:
+    python3 retrain_hello_world.py                         # hello→world (default)
+    python3 retrain_hello_world.py --q sole --a luna       # sole→luna
+    python3 retrain_hello_world.py --q one  --a two --out one-two
 """
 
-import json, math, sys
+import argparse, json, math, sys
 import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
@@ -13,11 +18,20 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent))
 from sinmachine import (build_default_perm, y_center, char_to_idx,
                         _VOCAB_SIZE, MODELS_DIR, _TOKEN_DISPLAY)
 
-PERM = build_default_perm(multi_end=True)
-Q, A = "hello", "world\x03"
-FULL = Q + A
-N = len(FULL)   # 11
-N_HARM = 8
+parser = argparse.ArgumentParser()
+parser.add_argument("--q",   default="hello",        help="question string")
+parser.add_argument("--a",   default="world\x03",    help="answer string (use \\x03 for END)")
+parser.add_argument("--out", default=None,           help="output model name (default: <q>-<a>)")
+parser.add_argument("--n",   type=int, default=8,   help="number of harmonics (default: 8)")
+args = parser.parse_args()
+
+PERM   = build_default_perm(multi_end=True)
+Q      = args.q
+A      = args.a.encode().decode('unicode_escape') if '\\x' in args.a else args.a
+OUT    = args.out or f"{Q}-{A.rstrip(chr(3))}"
+FULL   = Q + A
+N      = len(FULL)
+N_HARM = args.n
 
 TARGETS = np.array([y_center(char_to_idx(c, PERM)) for c in FULL])
 
@@ -153,8 +167,8 @@ print(f"  Char match : {n_correct}/{N}")
 perm_serial = [_TOKEN_DISPLAY.get(c, c) for c in PERM]
 
 out = {
-    "name":           "hello-world",
-    "description":    "joint-trained on 'datasets/hello-world.jsonl', phase_feedback=0",
+    "name":           OUT,
+    "description":    f"phase_feedback=0 retrain: q={Q!r} a={A!r}",
     "harmonics":      [[round(float(o), 6), round(float(a), 6)]
                        for o, a in zip(omegas, amps)],
     "dt":             round(float(dt), 6),
@@ -165,7 +179,7 @@ out = {
     "_training_phi":  round(float(phi), 6),
 }
 
-out_path = MODELS_DIR / "hello-world.json"
+out_path = MODELS_DIR / f"{OUT}.json"
 with open(out_path, "w") as f:
     json.dump(out, f, indent=2)
 print(f"  Saved → {out_path}")
