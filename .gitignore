@@ -1,30 +1,19 @@
-/vendor/
-node_modules/
-npm-debug.log
-yarn-error.log
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
 
-# Laravel 4 specific
-bootstrap/compiled.php
-app/storage/
+# Virtual environments
+.venv/
+venv/
+env/
 
-# Laravel 5 & Lumen specific
-public/storage
-public/hot
+# Generic training output (named artifacts like hello-world.json are kept)
+models/trained.json
 
-# Laravel 5 & Lumen specific with changed public path
-public_html/storage
-public_html/hot
+# IDE
+.idea/
+.vscode/
 
-storage/*.key
-.env
-Homestead.yaml
-Homestead.json
-/.vagrant
-.phpunit.result.cache
-
-/public/build
-/storage/pail
-.env.backup
-.env.production
-.phpactor.json
-auth.json
+# OS
+.DS_Store
