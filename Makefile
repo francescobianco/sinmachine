@@ -22,7 +22,7 @@ test-hello-world:
 	python3 sinmachine.py --chat --model hello-world
 
 simple-sums:
-	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums --multijoint
+	python3 vocab_align.py --q "1+1=" --a "2" --harmonics 2 --budget 10 --rounds 20 --save simple-sums
 
 simple-sums-mj:
 	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums-mj --multijoint

@@ -43,6 +43,8 @@ def load_model(name: str = "default") -> dict:
     with open(path) as f:
         data = json.load(f)
     harmonics = [tuple(h) for h in data["harmonics"]]
+    perm = data.get("perm", list(VOCAB))   # custom vocab permutation, or default
+    end_char_idx = perm.index(_END_CHAR)
     return {
         "name": data["name"],
         "description": data.get("description", ""),
@@ -51,6 +53,10 @@ def load_model(name: str = "default") -> dict:
         "dt": data["dt"],
         "phase_feedback": data["phase_feedback"],
         "steps": data["steps"],
+        "perm": perm,
+        "end_char_idx": end_char_idx,
+        **{k: data[k] for k in ("end_zones", "_stream_phi", "_stream",
+                                  "_training_phis") if k in data},
     }
 
 
@@ -65,6 +71,16 @@ def harmonic(t: float, phi: float, model: dict) -> float:
 def map_to_token(y: float) -> int:
     idx = int((y + 1) / 2 * _VOCAB_SIZE)
     return max(0, min(_VOCAB_SIZE - 1, idx))
+
+
+def model_char_to_y(c: str, model: dict) -> float:
+    """char → y using the model's vocab permutation."""
+    perm = model.get("perm", VOCAB)
+    try:
+        idx = perm.index(c)
+    except ValueError:
+        idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
+    return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
 
 
 def update_phase(phi: float, token_idx: int, phase_feedback: float) -> float:
@@ -121,13 +137,14 @@ def _simulate(t0: float, phi0: float, model: dict, steps: int,
 
     If stop_on_end is True, halts as soon as the END token is produced.
     """
+    perm = model.get("perm", VOCAB)
     phi = phi0
     t = t0
     trace = []
     for _ in range(steps):
         y = harmonic(t, phi, model)
         idx = map_to_token(y)
-        trace.append((t, y, idx, VOCAB[idx]))
+        trace.append((t, y, idx, perm[idx]))
         if stop_on_end and is_end_y(y, model):
             break
         phi = update_phase(phi, idx, model["phase_feedback"])
@@ -166,7 +183,7 @@ def search_phase(target: str, model: dict, resolution: int = 2000) -> tuple[floa
     If the sequence does not exist in the function, the loss stays high, signalling
     insufficient model expressivity rather than a system error.
     """
-    targets_y = [char_to_y(c) for c in target]
+    targets_y = [model_char_to_y(c, model) for c in target]
 
     best_phi = 0.0
     best_loss = float("inf")
@@ -214,11 +231,12 @@ def query(question: str, model: dict,
     trace_a, _, _ = _simulate(t_end, phi_end, model, answer_len, stop_on_end=True)
 
     # strip the END token from display, keep it in trace
-    answer_chars = [c for _, _, idx, c in trace_a if idx != END_IDX]
+    end_idx = model.get("end_char_idx", END_IDX)
+    answer_chars = [c for _, _, idx, c in trace_a if idx != end_idx]
     answer = "".join(answer_chars)
 
     match = sum(1 for a, b in zip(reconstructed, question) if a == b)
-    ended = any(idx == END_IDX for _, _, idx, _ in trace_a)
+    ended = any(idx == end_idx for _, _, idx, _ in trace_a)
     return {
         "phi_q": phi_q,
         "search_loss": search_loss,

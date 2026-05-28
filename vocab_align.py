@@ -7,7 +7,9 @@ we progressively swap the vocabulary positions of the 'wrong' and 'right'
 chars so that what the model naturally produces becomes correct.
 
 State is maintained as a full permutation of the vocab (a list of 97 chars),
-guaranteeing that the mapping is always a valid bijection.
+guaranteeing that the mapping is always a valid bijection.  The final perm
+is saved as part of the model JSON so sinmachine.py uses it for both
+phase-search targets and decoding.
 
 Each iteration:
   1. Train for --budget seconds (using current perm for char→y targets)
@@ -18,18 +20,23 @@ Each iteration:
   5. Retrain with the new perm
   6. Repeat until correct or max-rounds
 
-Usage:
-    python3 vocab_align.py --target "1+1=2" --budget 10 --rounds 8
+Usage — exploration:
+    python3 vocab_align.py --target "1+1=2" --budget 10 --rounds 14
+
+Usage — train a Q→A model and save it:
+    python3 vocab_align.py --q "1+1=" --a "2" --budget 10 --rounds 14 --save simple-sums
 """
 
 import argparse
+import json
 import math
+import pathlib
 import time
 
-import numpy as np
 from scipy.optimize import differential_evolution
 
-from sinmachine import _VOCAB_SIZE, _DEFAULT_END_ZONES, _END_CHAR
+from sinmachine import (_VOCAB_SIZE, _DEFAULT_END_ZONES, _END_CHAR,
+                        MODELS_DIR, _END_ZONE_HALF)
 
 
 # ── vocab as a permutation ────────────────────────────────────────
@@ -190,16 +197,60 @@ def apply_swaps(got, target, perm):
 
 # ── main loop ─────────────────────────────────────────────────────
 
+def save_model(name, best_x, n_h, perm, seq, q_len):
+    """Save converged model as models/<name>.json with embedded vocab perm."""
+    harmonics = [[abs(best_x[1 + i * 2]), abs(best_x[2 + i * 2])] for i in range(n_h)]
+    dt = abs(best_x[1 + n_h * 2]) + 1e-6
+    pf = best_x[2 + n_h * 2]
+    phi = best_x[0]
+
+    end_idx = char_to_idx(_END_CHAR, perm)
+    end_y_center = ((end_idx + 0.5) / _VOCAB_SIZE) * 2 - 1
+
+    model = {
+        "name": name,
+        "description": f"vocab-aligned model trained on {seq!r}",
+        "harmonics": harmonics,
+        "dt": dt,
+        "phase_feedback": pf,
+        "steps": len(seq) + 10,
+        "perm": perm,
+        "end_zones": [[end_y_center, _END_ZONE_HALF]],
+        "_training_phi": phi,
+    }
+
+    out_path = MODELS_DIR / f"{name}.json"
+    with open(out_path, "w") as f:
+        json.dump(model, f, indent=2)
+    print(f"  Model saved → {out_path}")
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", default="1+1=2", help="sequence to memorise")
+    parser.add_argument("--target", default=None, help="flat sequence to memorise")
+    parser.add_argument("--q", default=None, help="question part (Q→A mode)")
+    parser.add_argument("--a", default=None, help="answer part (Q→A mode, END auto-appended)")
     parser.add_argument("--harmonics", type=int, default=2, help="number of harmonics")
     parser.add_argument("--budget", type=float, default=10.0, help="seconds per round")
-    parser.add_argument("--rounds", type=int, default=8, help="max swap rounds")
+    parser.add_argument("--rounds", type=int, default=14, help="max swap rounds")
     parser.add_argument("--teacher", action="store_true", help="teacher-forced feedback")
+    parser.add_argument("--save", default=None, help="save converged model under this name")
     args = parser.parse_args()
 
-    seq = args.target
+    # Determine training sequence
+    if args.q is not None and args.a is not None:
+        q_part = args.q
+        a_part = args.a + _END_CHAR
+        seq = q_part + a_part
+        q_len = len(q_part)
+    elif args.target is not None:
+        seq = args.target
+        q_len = 0
+    else:
+        seq = "1+1=2"
+        q_len = 0
+
     n_h = args.harmonics
     perm = build_default_perm()
     end_zones = _DEFAULT_END_ZONES
@@ -246,6 +297,8 @@ def main():
             print(f"  Permutation changes: {len(diffs)} positions remapped")
             for idx, d, p in diffs[:20]:
                 print(f"    idx {idx:3d}: default={d!r} → now={p!r}")
+            if args.save:
+                save_model(args.save, best_x, n_h, perm, seq, q_len)
             break
 
         new_perm, applied, conflicts = apply_swaps(got, seq, perm)
