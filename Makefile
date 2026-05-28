@@ -1,4 +1,4 @@
-.PHONY: chat run train hello-world test-hello-world simple-sums test-simple-sums list-models help
+.PHONY: chat run train hello-world test-hello-world simple-sums simple-sums-mj simple-sums-stream simple-sums-noend simple-sums-me hello-world-me test-simple-sums list-models help
 
 MODEL      ?= default
 DATASET    ?= datasets/sample.jsonl
@@ -22,7 +22,22 @@ test-hello-world:
 	python3 sinmachine.py --chat --model hello-world
 
 simple-sums:
-	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums --joint
+	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums --multijoint
+
+simple-sums-mj:
+	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums-mj --multijoint
+
+simple-sums-stream:
+	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums-stream --stream
+
+simple-sums-noend:
+	python3 trainer.py datasets/simple-sums-noend.jsonl --base dense --output simple-sums-noend --multijoint
+
+simple-sums-me:
+	python3 trainer.py datasets/simple-sums.jsonl --base dense --output simple-sums-me --multijoint --multi-end
+
+hello-world-me:
+	python3 trainer.py datasets/hello-world.jsonl --base dense --output hello-world-me --joint --multi-end
 
 test-simple-sums:
 	python3 sinmachine.py --chat --model simple-sums

@@ -71,6 +71,22 @@ def update_phase(phi: float, token_idx: int, phase_feedback: float) -> float:
     return phi + phase_feedback * (token_idx / _VOCAB_SIZE) * 2 * math.pi
 
 
+# ── multi-END zones ───────────────────────────────────────────────
+#
+# A model can define multiple END zones spread across the y-space.
+# Each zone is a (center_y, half_width) pair; any y inside stops generation.
+# Default: single high zone (backward-compatible).
+# Defined AFTER char_to_y so we can use it for the default center.
+
+_END_ZONE_HALF = 3.0 / _VOCAB_SIZE   # ≈3 token buckets wide
+
+_MULTI_END_ZONES = [
+    (-0.90, _END_ZONE_HALF),   # END_LOW  — below arithmetic chars
+    (+0.40, _END_ZONE_HALF),   # END_MID  — above arithmetic chars
+    (+0.90, _END_ZONE_HALF),   # END_HIGH — near the sinusoidal peak
+]
+
+
 def char_to_y(c: str) -> float:
     """Char → centre of its quantisation bucket in [-1, 1].
 
@@ -84,6 +100,17 @@ def char_to_y(c: str) -> float:
     else:
         idx = max(0, min(_VOCAB_SIZE - 1, ord(c) - 32))
     return ((idx + 0.5) / _VOCAB_SIZE) * 2 - 1
+
+
+_DEFAULT_END_ZONES = [(char_to_y(_END_CHAR), _END_ZONE_HALF)]
+
+
+def get_end_zones(model: dict) -> list:
+    return model.get("end_zones", _DEFAULT_END_ZONES)
+
+
+def is_end_y(y: float, model: dict) -> bool:
+    return any(abs(y - ctr) <= hw for ctr, hw in get_end_zones(model))
 
 
 # ── simulation ────────────────────────────────────────────────────
@@ -101,7 +128,7 @@ def _simulate(t0: float, phi0: float, model: dict, steps: int,
         y = harmonic(t, phi, model)
         idx = map_to_token(y)
         trace.append((t, y, idx, VOCAB[idx]))
-        if stop_on_end and idx == END_IDX:
+        if stop_on_end and is_end_y(y, model):
             break
         phi = update_phase(phi, idx, model["phase_feedback"])
         t += model["dt"]
@@ -201,6 +228,42 @@ def query(question: str, model: dict,
         "ended": ended,
         "trace_q": trace_q,
         "trace_a": trace_a,
+    }
+
+
+# ── stream inference: scan-based retrieval ───────────────────────
+
+def stream_query(question: str, model: dict, scan_steps: int = None) -> dict:
+    """Retrieve the answer by scanning the model's generated text stream.
+
+    Used with stream-trained models: run the model from _stream_phi for
+    many steps, then find the question as a substring and read what follows.
+    No phase search involved — O(1) per query after the model is run.
+    """
+    if scan_steps is None:
+        stream = model.get("_stream", "")
+        scan_steps = max(model["steps"], len(stream) * 2)
+
+    phi0 = model.get("_stream_phi", 0.0)
+    trace, _, _ = _simulate(0.0, phi0, model, scan_steps, stop_on_end=False)
+    text = "".join(c for _, _, _, c in trace)
+
+    pos = text.find(question)
+    if pos == -1:
+        return {"found": False, "answer": "", "text": text, "pos": -1}
+
+    answer_chars = []
+    answer_start = pos + len(question)
+    for _, _, idx, c in trace[answer_start:]:
+        if idx == END_IDX:
+            break
+        answer_chars.append(c)
+
+    return {
+        "found": True,
+        "answer": "".join(answer_chars),
+        "text": text,
+        "pos": pos,
     }
 
 
