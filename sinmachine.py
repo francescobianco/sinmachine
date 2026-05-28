@@ -83,7 +83,7 @@ def load_model(name: str = "default") -> dict:
     with open(path) as f:
         data = json.load(f)
     harmonics = [tuple(h) for h in data["harmonics"]]
-    perm = data.get("perm", list(VOCAB))
+    perm = [parse_tags(c) for c in data.get("perm", list(VOCAB))]
 
     # end_chars: list of internal chars that mean END (stored as tags or chars)
     raw_ec = data.get("end_chars", [_END_CHAR])

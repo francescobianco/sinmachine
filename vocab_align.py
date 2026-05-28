@@ -250,7 +250,7 @@ def save_model(name, best_x, n_h, perm, seq, q_len):
         "dt":             dt,
         "phase_feedback": pf,
         "steps":          len(seq) + 10,
-        "perm":           perm,
+        "perm":           [_TOKEN_DISPLAY.get(c, c) for c in perm],
         "end_chars":      end_chars_in_perm,
         "_training_phi":  phi,
     }
