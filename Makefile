@@ -1,4 +1,4 @@
-.PHONY: chat run train hello-world list-models help
+.PHONY: chat run train hello-world test-hello-world list-models help
 
 MODEL      ?= default
 DATASET    ?= datasets/sample.jsonl
@@ -18,6 +18,9 @@ train:
 hello-world:
 	python3 trainer.py datasets/hello-world.jsonl --base default --output hello-world --joint
 
+test-hello-world:
+	python3 sinmachine.py --chat --model hello-world
+
 list-models:
 	python3 sinmachine.py --list-models
 
@@ -29,5 +32,6 @@ help:
 	@echo "  make train                           train on datasets/sample.jsonl"
 	@echo "  make train DATASET=... BASE=... OUTPUT=..."
 	@echo "  make hello-world                     train hello-world model"
+	@echo "  make test-hello-world                chat with the hello-world model"
 	@echo "  make list-models                     show available models"
 	@echo ""
