@@ -1,0 +1,8 @@
+{"q": "echo \"hello\";", "a": "hello"}
+{"q": "print(\"hello\")", "a": "hello"}
+{"q": "console.log(\"hello\");", "a": "hello"}
+{"q": "printf(\"hello\");", "a": "hello"}
+{"q": "puts \"hello\"", "a": "hello"}
+{"q": "print \"hello\";", "a": "hello"}
+{"q": "System.out.print(\"hello\");", "a": "hello"}
+{"q": "fmt.Print(\"hello\")", "a": "hello"}

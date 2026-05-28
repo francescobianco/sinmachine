@@ -1,4 +1,4 @@
-.PHONY: chat run train hello-world test-hello-world simple-sums simple-sums-mj simple-sums-stream simple-sums-noend simple-sums-me hello-world-me test-simple-sums list-models help
+.PHONY: chat run train hello-world test-hello-world simple-sums simple-sums-mj simple-sums-stream simple-sums-noend simple-sums-me hello-world-me test-simple-sums micro-bench micro-identity micro-not micro-and micro-next micro-lower list-models help
 
 MODEL      ?= default
 DATASET    ?= datasets/sample.jsonl
@@ -42,6 +42,28 @@ hello-world-me:
 test-simple-sums:
 	python3 sinmachine.py --chat --model simple-sums
 
+micro-bench:
+	python3 benchmark.py datasets/identity-bits-noend.jsonl --base dense --max 6 --de-iters 300 --de-pop 8 --seeds 42
+	python3 benchmark.py datasets/not-bits-noend.jsonl --base dense --max 6 --de-iters 300 --de-pop 8 --seeds 42
+	python3 benchmark.py datasets/and-bits-noend.jsonl --base dense --max 4 --de-iters 300 --de-pop 8 --seeds 42
+	python3 benchmark.py datasets/next-digit-noend.jsonl --base dense --max 5 --de-iters 300 --de-pop 8 --seeds 42
+	python3 benchmark.py datasets/lowercase-abc-noend.jsonl --base dense --max 5 --de-iters 300 --de-pop 8 --seeds 42
+
+micro-identity:
+	python3 trainer.py datasets/identity-bits-noend.jsonl --base dense --output identity-bits --multijoint
+
+micro-not:
+	python3 trainer.py datasets/not-bits-noend.jsonl --base dense --output not-bits --multijoint
+
+micro-and:
+	python3 trainer.py datasets/and-bits-noend.jsonl --base dense --output and-bits --multijoint
+
+micro-next:
+	python3 trainer.py datasets/next-digit-noend.jsonl --base dense --output next-digit --multijoint
+
+micro-lower:
+	python3 trainer.py datasets/lowercase-abc-noend.jsonl --base dense --output lowercase-abc --multijoint
+
 benchmark:
 	python3 benchmark.py datasets/simple-sums-noend.jsonl --de-iters 500 --de-pop 8 --seeds 42
 
@@ -60,5 +82,11 @@ help:
 	@echo "  make test-hello-world                chat with the hello-world model"
 	@echo "  make simple-sums                     train simple-sums model"
 	@echo "  make test-simple-sums                chat with the simple-sums model"
+	@echo "  make micro-bench                     benchmark 5 tiny symbolic datasets"
+	@echo "  make micro-identity                  train identity-bits model"
+	@echo "  make micro-not                       train not-bits model"
+	@echo "  make micro-and                       train and-bits model"
+	@echo "  make micro-next                      train next-digit model"
+	@echo "  make micro-lower                     train lowercase-abc model"
 	@echo "  make list-models                     show available models"
 	@echo ""
